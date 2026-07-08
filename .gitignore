@@ -1,0 +1,41 @@
+# Rust ビルド成果物
+/target/
+**/*.rs.bk
+
+# メディアファイル（誤コミット防止・publicリポジトリのため厳格に）
+*.mov
+*.mp4
+*.m4a
+*.wav
+*.mkv
+*.avi
+*.flac
+*.mp3
+
+# 文字起こし結果・字幕（個人情報・社内情報を含む可能性）
+*.txt
+!requirements*.txt
+*.srt
+*.vtt
+*.lrc
+
+# whisper モデルファイル
+*.bin
+*.gguf
+models/
+
+# 機密情報
+.env
+.env.*
+*.pem
+*.key
+credentials*
+secrets*
+
+# macOS
+.DS_Store
+
+# IDE / エディタ
+.vscode/
+.idea/
+*.swp

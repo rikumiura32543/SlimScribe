@@ -1,0 +1,18 @@
+[package]
+name = "slimscribe"
+version = "0.1.0"
+edition = "2021"
+description = "OBS録画(.mov)の軽量化・音声抽出・文字起こしを自動化するCUIツール"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+walkdir = "2"
+dirs = "6"
+indicatif = "0.17"
+tempfile = "3"
+
+[profile.release]
+lto = true
+strip = true
