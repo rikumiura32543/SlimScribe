@@ -8,7 +8,7 @@ use std::path::PathBuf;
     about = "OBS録画(.mov)の軽量化・音声抽出・文字起こしを自動化するCUIツール"
 )]
 pub struct Args {
-    /// 対象フォルダ（この直下から最新の .mov を自動検出。デフォルト: ~/Movies）
+    /// 対象フォルダ（この直下から最新の .mov を自動検出。デフォルト: macOS=~/Movies, Windows=Videos）
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
 
@@ -16,9 +16,13 @@ pub struct Args {
     #[arg(short, long, conflicts_with = "dir")]
     pub file: Option<PathBuf>,
 
-    /// 動画コーデック（VideoToolbox ハードウェア加速）
+    /// 動画コーデック（環境に応じたハードウェア加速エンコーダを自動選択）
     #[arg(long, value_enum, default_value_t = Codec::H264)]
     pub codec: Codec,
+
+    /// mp4 の最大ファイルサイズ (MB)。超える見込みの場合は複数ファイルに分割。0 で分割無効
+    #[arg(long, default_value_t = 200)]
+    pub max_size_mb: u64,
 
     /// 動画ビットレート（未指定時: 2M と元動画の映像ビットレートの小さい方を自動選択）
     #[arg(long)]
@@ -53,13 +57,4 @@ pub struct Args {
 pub enum Codec {
     H264,
     Hevc,
-}
-
-impl Codec {
-    pub fn ffmpeg_name(self) -> &'static str {
-        match self {
-            Codec::H264 => "h264_videotoolbox",
-            Codec::Hevc => "hevc_videotoolbox",
-        }
-    }
 }
