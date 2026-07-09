@@ -2,7 +2,8 @@
 
 macOS (Apple Silicon) / Windows 対応、OBS録画ファイル後処理自動化CUIツール。
 
-指定フォルダ（デフォルト: macOS=`~/Movies`, Windows=`Videos`）内の最新 `.mov` を自動検出し、以下を並列実行:
+指定フォルダ（デフォルト: macOS=`~/Movies`, Windows=`Videos`）内の最新の動画ファイル
+（`.mov` `.mp4` `.mkv` `.flv` `.ts` — OBSの録画形式に対応）を自動検出し、以下を並列実行:
 
 1. **軽量化** — ハードウェア加速で `.mp4` に変換（200MB超の見込みなら自動分割）
 2. **音声抽出** — `.m4a` (AAC 128kbps) を生成
@@ -63,7 +64,7 @@ OBSで録画を停止した後、ターミナルで実行するだけ:
 slimscribe
 ```
 
-これだけで `~/Movies` 内の**最新の .mov** を自動検出し、同じフォルダに以下を生成:
+これだけで `~/Movies`（Windowsは `Videos`）内の**最新の動画ファイル**を自動検出し、同じフォルダに以下を生成:
 
 ```
 ~/Movies/
@@ -107,7 +108,10 @@ slimscribe --language en          # 英語の録画を文字起こし
 slimscribe --no-convert           # mp4 変換をスキップ（音声・文字起こしのみ）
 slimscribe --max-size-mb 500      # 分割の上限サイズを変更
 slimscribe --max-size-mb 0        # 分割を無効化（常に単一 mp4）
+slimscribe --ext mkv,mp4          # 自動検出の対象拡張子を限定
 ```
+
+> **Note**: 入力が `.mp4` の場合、変換出力は `元ファイル名_slim.mp4` になる（入力の上書き防止）。
 
 ### mp4 の自動分割
 
@@ -124,7 +128,8 @@ slimscribe --max-size-mb 0        # 分割を無効化（常に単一 mp4）
 
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
-| `--dir, -d` | macOS: `~/Movies`<br>Win: `Videos` | 最新 .mov を探すフォルダ |
+| `--dir, -d` | macOS: `~/Movies`<br>Win: `Videos` | 最新の動画を探すフォルダ |
+| `--ext` | `mov,mp4,mkv,flv,ts` | 自動検出の対象拡張子（カンマ区切り） |
 | `--file, -f` | — | 入力ファイル直接指定 |
 | `--codec` | `h264` | `h264` / `hevc`（エンコーダは環境に応じて自動選択） |
 | `--bitrate` | 自動 | 動画ビットレート（未指定時は 2M と元動画ビットレートの小さい方を自動選択） |

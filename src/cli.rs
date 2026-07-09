@@ -8,9 +8,18 @@ use std::path::PathBuf;
     about = "OBS録画(.mov)の軽量化・音声抽出・文字起こしを自動化するCUIツール"
 )]
 pub struct Args {
-    /// 対象フォルダ（この直下から最新の .mov を自動検出。デフォルト: macOS=~/Movies, Windows=Videos）
+    /// 対象フォルダ（この直下から最新の動画を自動検出。デフォルト: macOS=~/Movies, Windows=Videos）
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
+
+    /// 自動検出の対象拡張子（カンマ区切り。OBSの録画形式に対応）
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "mov,mp4,mkv,flv,ts",
+        value_name = "EXT,..."
+    )]
+    pub ext: Vec<String>,
 
     /// 入力ファイルを直接指定（指定時は自動検出をスキップ）
     #[arg(short, long, conflicts_with = "dir")]

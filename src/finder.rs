@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
-/// dir 直下（サブフォルダは走査しない）から最終更新が最も新しい .mov を返す
-pub fn find_latest_mov(dir: &Path) -> Result<PathBuf> {
+/// dir 直下（サブフォルダは走査しない）から、対象拡張子のうち
+/// 最終更新が最も新しい動画ファイルを返す
+pub fn find_latest_media(dir: &Path, extensions: &[String]) -> Result<PathBuf> {
     if !dir.is_dir() {
         bail!("フォルダが存在しません: {}", dir.display());
     }
@@ -18,7 +19,11 @@ pub fn find_latest_mov(dir: &Path) -> Result<PathBuf> {
             entry
                 .path()
                 .extension()
-                .map(|ext| ext.eq_ignore_ascii_case("mov"))
+                .map(|ext| {
+                    extensions
+                        .iter()
+                        .any(|target| ext.eq_ignore_ascii_case(target))
+                })
                 .unwrap_or(false)
         })
         .filter_map(|entry| {
@@ -29,7 +34,11 @@ pub fn find_latest_mov(dir: &Path) -> Result<PathBuf> {
 
     match latest {
         Some((_, path)) => Ok(path),
-        None => bail!(".mov ファイルが見つかりません: {}", dir.display()),
+        None => bail!(
+            "動画ファイル（{}）が見つかりません: {}",
+            extensions.join(", "),
+            dir.display()
+        ),
     }
 }
 
@@ -65,26 +74,33 @@ mod tests {
             .expect("mtime 設定失敗");
     }
 
+    /// デフォルトの対象拡張子
+    fn default_exts() -> Vec<String> {
+        ["mov", "mp4", "mkv", "flv", "ts"]
+            .map(String::from)
+            .to_vec()
+    }
+
     #[test]
     fn 空フォルダはエラー() {
         let dir = tempfile::tempdir().expect("tempdir 作成失敗");
-        assert!(find_latest_mov(dir.path()).is_err());
+        assert!(find_latest_media(dir.path(), &default_exts()).is_err());
     }
 
     #[test]
     fn 存在しないフォルダはエラー() {
-        assert!(find_latest_mov(Path::new("/nonexistent/dir")).is_err());
+        assert!(find_latest_media(Path::new("/nonexistent/dir"), &default_exts()).is_err());
     }
 
     #[test]
-    fn 最新のmovを選択() {
+    fn 複数拡張子から最新を選択() {
         let dir = tempfile::tempdir().expect("tempdir 作成失敗");
         create_file_with_mtime(dir.path(), "old.mov", Duration::from_secs(3600));
-        create_file_with_mtime(dir.path(), "newest.mov", Duration::from_secs(60));
-        create_file_with_mtime(dir.path(), "middle.mov", Duration::from_secs(1800));
+        create_file_with_mtime(dir.path(), "newest.mkv", Duration::from_secs(60));
+        create_file_with_mtime(dir.path(), "middle.mp4", Duration::from_secs(1800));
 
-        let found = find_latest_mov(dir.path()).expect("検出失敗");
-        assert_eq!(found.file_name().unwrap(), "newest.mov");
+        let found = find_latest_media(dir.path(), &default_exts()).expect("検出失敗");
+        assert_eq!(found.file_name().unwrap(), "newest.mkv");
     }
 
     #[test]
@@ -92,17 +108,29 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir 作成失敗");
         create_file_with_mtime(dir.path(), "video.MOV", Duration::from_secs(60));
 
-        let found = find_latest_mov(dir.path()).expect("検出失敗");
+        let found = find_latest_media(dir.path(), &default_exts()).expect("検出失敗");
         assert_eq!(found.file_name().unwrap(), "video.MOV");
     }
 
     #[test]
-    fn mov以外は無視() {
+    fn 対象外の拡張子は無視() {
+        let dir = tempfile::tempdir().expect("tempdir 作成失敗");
+        create_file_with_mtime(dir.path(), "newer.m4a", Duration::from_secs(10));
+        create_file_with_mtime(dir.path(), "notes.txt", Duration::from_secs(20));
+        create_file_with_mtime(dir.path(), "target.mov", Duration::from_secs(3600));
+
+        let found = find_latest_media(dir.path(), &default_exts()).expect("検出失敗");
+        assert_eq!(found.file_name().unwrap(), "target.mov");
+    }
+
+    #[test]
+    fn 指定した拡張子だけを対象にできる() {
         let dir = tempfile::tempdir().expect("tempdir 作成失敗");
         create_file_with_mtime(dir.path(), "newer.mp4", Duration::from_secs(10));
         create_file_with_mtime(dir.path(), "target.mov", Duration::from_secs(3600));
 
-        let found = find_latest_mov(dir.path()).expect("検出失敗");
+        let only_mov = vec!["mov".to_string()];
+        let found = find_latest_media(dir.path(), &only_mov).expect("検出失敗");
         assert_eq!(found.file_name().unwrap(), "target.mov");
     }
 
@@ -114,7 +142,7 @@ mod tests {
         create_file_with_mtime(&sub, "inner.mov", Duration::from_secs(10));
         create_file_with_mtime(dir.path(), "top.mov", Duration::from_secs(3600));
 
-        let found = find_latest_mov(dir.path()).expect("検出失敗");
+        let found = find_latest_media(dir.path(), &default_exts()).expect("検出失敗");
         assert_eq!(found.file_name().unwrap(), "top.mov");
     }
 
