@@ -66,7 +66,7 @@ fn resolve_input(args: &cli::Args) -> Result<PathBuf> {
                 .or_else(|| dirs::home_dir().map(|home| home.join("Movies")))
                 .context("動画フォルダを取得できません")?,
         };
-        finder::find_latest_mov(&dir)?
+        finder::find_latest_media(&dir, &args.ext)?
     };
 
     input
@@ -88,6 +88,37 @@ fn print_target_info(input: &Path) {
     println!("🎬 対象: {} ({size_mb:.0} MB, {age})", input.display());
 }
 
+/// mp4 の出力先。入力が既に .mp4 の場合は `_slim.mp4` を付けて上書きを回避
+/// （macOS 等の大文字小文字非区別ファイルシステムを考慮し .MP4 も同一視）
+fn mp4_output_path(input: &Path) -> PathBuf {
+    let is_mp4 = input
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("mp4"))
+        .unwrap_or(false);
+    if !is_mp4 {
+        return input.with_extension("mp4");
+    }
+    let stem = input
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    input.with_file_name(format!("{stem}_slim.mp4"))
+}
+
+/// 大文字小文字非区別ファイルシステムを考慮したパス一致判定
+fn paths_conflict(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    a.parent() == b.parent()
+        && match (a.file_name(), b.file_name()) {
+            (Some(name_a), Some(name_b)) => name_a
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&name_b.to_string_lossy()),
+            _ => false,
+        }
+}
+
 /// 出力先パス一覧
 struct Outputs {
     mp4: Option<PathBuf>,
@@ -100,20 +131,20 @@ struct Outputs {
 /// 出力パスを決定し、上書き衝突を事前チェック
 fn plan_outputs(input: &Path, args: &cli::Args) -> Result<Outputs> {
     let outputs = Outputs {
-        mp4: (!args.no_convert).then(|| input.with_extension("mp4")),
+        mp4: (!args.no_convert).then(|| mp4_output_path(input)),
         m4a: input.with_extension("m4a"),
         txt: (!args.no_transcribe).then(|| input.with_extension("txt")),
         txt_base: input.with_extension(""),
     };
 
-    // --file で .mp4 / .m4a 等を渡された場合、出力が入力を破壊しないよう防止
+    // 拡張子の付け替えで防げない衝突（.m4a 入力等）を最終ガード
     let collision = [outputs.mp4.as_deref(), Some(&outputs.m4a), outputs.txt.as_deref()]
         .into_iter()
         .flatten()
-        .find(|path| *path == input);
+        .find(|path| paths_conflict(path, input));
     if let Some(path) = collision {
         bail!(
-            "出力先が入力ファイルと同一になるため処理できません: {}\n入力には .mov ファイルを指定してください",
+            "出力先が入力ファイルと同一になるため処理できません: {}\n入力には動画ファイル（mov, mp4, mkv 等）を指定してください",
             path.display()
         );
     }
@@ -413,6 +444,7 @@ mod tests {
         cli::Args {
             dir: None,
             file: None,
+            ext: ["mov", "mp4", "mkv", "flv", "ts"].map(String::from).to_vec(),
             codec: cli::Codec::H264,
             max_size_mb: 200,
             bitrate: None,
@@ -437,11 +469,31 @@ mod tests {
     }
 
     #[test]
+    fn mp4入力はslimサフィックスで上書きを回避() {
+        assert_eq!(
+            mp4_output_path(Path::new("/tmp/video.mp4")),
+            Path::new("/tmp/video_slim.mp4")
+        );
+        // 大文字拡張子も同一ファイル扱い（大文字小文字非区別FS対策）
+        assert_eq!(
+            mp4_output_path(Path::new("/tmp/video.MP4")),
+            Path::new("/tmp/video_slim.mp4")
+        );
+        assert_eq!(
+            mp4_output_path(Path::new("/tmp/video.mkv")),
+            Path::new("/tmp/video.mp4")
+        );
+
+        let outputs = plan_outputs(Path::new("/tmp/video.mp4"), &test_args()).expect("失敗");
+        assert_eq!(outputs.mp4.as_deref(), Some(Path::new("/tmp/video_slim.mp4")));
+    }
+
+    #[test]
     fn 入力と出力が衝突する場合はエラー() {
         // .m4a 入力 → 音声出力パスと同一になり入力破壊のリスク
         assert!(plan_outputs(Path::new("/tmp/audio.m4a"), &test_args()).is_err());
-        // .mp4 入力 → 変換出力パスと同一
-        assert!(plan_outputs(Path::new("/tmp/video.mp4"), &test_args()).is_err());
+        // 大文字 .M4A も同一ファイル扱いで検出
+        assert!(plan_outputs(Path::new("/tmp/audio.M4A"), &test_args()).is_err());
     }
 
     #[test]
