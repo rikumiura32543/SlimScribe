@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Instant;
 
+/// m4a / mp4 音声トラックのビットレート (128kbps)
+const AUDIO_BPS: u64 = 128_000;
+
 fn main() -> Result<()> {
     let args = cli::Args::parse();
     ffmpeg::check_ffmpeg()?;
@@ -23,18 +26,22 @@ fn main() -> Result<()> {
     let mp = MultiProgress::new();
 
     // 【並列実行】動画変換は別スレッド、音声抽出→文字起こしはメインスレッド
-    let convert_handle = spawn_convert(&mp, &input, &outputs, &args);
+    let convert_handle = spawn_convert(&mp, &input, &outputs, &args)?;
     let audio_result = run_audio_pipeline(&mp, &input, &outputs, &args);
 
-    let convert_result = convert_handle
-        .map(|handle| {
-            handle
-                .join()
-                .unwrap_or_else(|_| bail_join_error())
-        })
-        .transpose();
+    let convert_result: Result<Vec<PathBuf>> = match convert_handle {
+        None => Ok(Vec::new()),
+        Some(handle) => handle
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("動画変換スレッドが異常終了しました"))),
+    };
 
-    print_summary(&outputs, started.elapsed().as_secs_f64());
+    let mut produced: Vec<PathBuf> = convert_result.as_deref().unwrap_or(&[]).to_vec();
+    produced.push(outputs.m4a.clone());
+    if let Some(txt) = &outputs.txt {
+        produced.push(txt.clone());
+    }
+    print_summary(&produced, started.elapsed().as_secs_f64());
 
     // どれか失敗していたら非ゼロ終了
     audio_result?;
@@ -54,9 +61,10 @@ fn resolve_input(args: &cli::Args) -> Result<PathBuf> {
     } else {
         let dir = match &args.dir {
             Some(dir) => dir.clone(),
-            None => dirs::home_dir()
-                .context("ホームディレクトリを取得できません")?
-                .join("Movies"),
+            // macOS: ~/Movies, Windows: Videos フォルダ
+            None => dirs::video_dir()
+                .or_else(|| dirs::home_dir().map(|home| home.join("Movies")))
+                .context("動画フォルダを取得できません")?,
         };
         finder::find_latest_mov(&dir)?
     };
@@ -111,12 +119,24 @@ fn plan_outputs(input: &Path, args: &cli::Args) -> Result<Outputs> {
     }
 
     if !args.overwrite {
-        let existing: Vec<String> = [outputs.mp4.as_deref(), Some(&outputs.m4a), outputs.txt.as_deref()]
+        let mut existing: Vec<String> = [outputs.mp4.as_deref(), Some(&outputs.m4a), outputs.txt.as_deref()]
             .into_iter()
             .flatten()
             .filter(|path| path.exists())
             .map(|path| path.display().to_string())
             .collect();
+        // 分割出力（*_part000.mp4 等）の既存分も上書き対象として確認
+        if let (Some(mp4), Some(dir)) = (&outputs.mp4, input.parent()) {
+            if let Some(stem) = mp4.file_stem() {
+                let prefix = format!("{}_part", stem.to_string_lossy());
+                existing.extend(
+                    collect_parts(dir, &prefix)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|path| path.display().to_string()),
+                );
+            }
+        }
         if !existing.is_empty() {
             bail!(
                 "出力ファイルが既に存在します（--overwrite で上書き可能）:\n  {}",
@@ -127,44 +147,157 @@ fn plan_outputs(input: &Path, args: &cli::Args) -> Result<Outputs> {
     Ok(outputs)
 }
 
-/// 変換ビットレートを決定（明示指定 > 2M と元動画ビットレートの小さい方）
-fn resolve_bitrate(input: &Path, explicit: Option<&str>) -> String {
-    const DEFAULT_BPS: u64 = 2_000_000;
-
-    if let Some(bitrate) = explicit {
-        return bitrate.to_string();
-    }
-    match ffmpeg::probe_video_bitrate(input) {
-        // 元動画が 2M 未満なら、それ以上のビットレートは肥大化するだけなので合わせる
-        // （極端に低い値は ffmpeg の不正引数を避けるため 100k で下限クランプ）
-        Some(source_bps) if source_bps < DEFAULT_BPS => {
-            format!("{}k", (source_bps / 1000).max(100))
-        }
-        _ => "2M".to_string(),
-    }
+/// "2M" / "419k" / "800000" 形式の文字列を bps に変換
+fn parse_bitrate(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let (number, unit) = match value.chars().last()? {
+        'k' | 'K' => (&value[..value.len() - 1], 1_000.0),
+        'm' | 'M' => (&value[..value.len() - 1], 1_000_000.0),
+        _ => (value, 1.0),
+    };
+    let parsed: f64 = number.parse().ok()?;
+    (parsed > 0.0).then_some((parsed * unit) as u64)
 }
 
-/// mp4 変換を別スレッドで開始
+/// 変換ビットレート (bps) を決定（明示指定 > 2M と元動画ビットレートの小さい方）
+fn resolve_bitrate(input: &Path, explicit: Option<&str>) -> Result<u64> {
+    const DEFAULT_BPS: u64 = 2_000_000;
+    const MIN_BPS: u64 = 100_000;
+
+    if let Some(value) = explicit {
+        return parse_bitrate(value)
+            .with_context(|| format!("ビットレート指定を解釈できません: {value}（例: 2M, 500k）"));
+    }
+    Ok(match ffmpeg::probe_video_bitrate(input) {
+        // 元動画が 2M 未満なら、それ以上のビットレートは肥大化するだけなので合わせる
+        Some(source_bps) if source_bps < DEFAULT_BPS => source_bps.max(MIN_BPS),
+        _ => DEFAULT_BPS,
+    })
+}
+
+/// 分割サイズ見積りの安全係数（平均ビットレートの揺らぎを吸収）
+const SPLIT_SAFETY: f64 = 0.85;
+
+/// 推定出力サイズが上限を超える場合、上限内に収まるセグメント長（秒）を返す
+fn plan_split(duration_secs: f64, total_bps: u64, max_bytes: u64) -> Option<u64> {
+    if max_bytes == 0 || duration_secs <= 0.0 || total_bps == 0 {
+        return None;
+    }
+    let estimated_bytes = total_bps as f64 / 8.0 * duration_secs;
+    let target_bytes = max_bytes as f64 * SPLIT_SAFETY;
+    if estimated_bytes <= target_bytes {
+        return None;
+    }
+    // サイズ上限の保証を優先（上限が小さい場合はセグメントも短くなる）
+    let segment_secs = (target_bytes * 8.0 / total_bps as f64).floor() as u64;
+    Some(segment_secs.max(1))
+}
+
+/// mp4 変換を別スレッドで開始。生成したファイル一覧を返すスレッドハンドルを返す
 fn spawn_convert(
     mp: &MultiProgress,
     input: &Path,
     outputs: &Outputs,
     args: &cli::Args,
-) -> Option<thread::JoinHandle<Result<()>>> {
-    let output = outputs.mp4.clone()?;
-    let codec = args.codec.ffmpeg_name();
-    let bitrate = resolve_bitrate(input, args.bitrate.as_deref());
-    let input = input.to_path_buf();
-    let pb = progress::spinner(mp, format!("動画を変換中... ({codec}, {bitrate})"));
+) -> Result<Option<thread::JoinHandle<Result<Vec<PathBuf>>>>> {
+    let Some(output) = outputs.mp4.clone() else {
+        return Ok(None);
+    };
+    let encoder = ffmpeg::select_encoder(args.codec)?;
+    let video_bps = resolve_bitrate(input, args.bitrate.as_deref())?;
+    let duration = ffmpeg::probe_duration(input).unwrap_or(0.0);
+    let segment_secs = plan_split(
+        duration,
+        video_bps + AUDIO_BPS,
+        args.max_size_mb.saturating_mul(1_000_000),
+    );
 
-    Some(thread::spawn(move || {
-        let result = ffmpeg::convert_to_mp4(&input, &output, codec, &bitrate);
+    let label = match segment_secs {
+        Some(secs) => {
+            let parts = (duration / secs as f64).ceil() as u64;
+            format!(
+                "動画を変換中... ({encoder}, {}k, 約{parts}ファイルに分割)",
+                video_bps / 1000
+            )
+        }
+        None => format!("動画を変換中... ({encoder}, {}k)", video_bps / 1000),
+    };
+    let pb = progress::spinner(mp, label);
+    let input = input.to_path_buf();
+
+    Ok(Some(thread::spawn(move || {
+        let result = run_convert(&input, &output, &encoder, video_bps, segment_secs);
         match &result {
-            Ok(()) => progress::finish_ok(&pb, format!("動画変換 完了: {}", output.display())),
+            Ok(files) if files.len() == 1 => {
+                progress::finish_ok(&pb, format!("動画変換 完了: {}", files[0].display()));
+            }
+            Ok(files) => {
+                progress::finish_ok(&pb, format!("動画変換 完了: {}ファイルに分割", files.len()));
+            }
             Err(err) => progress::finish_err(&pb, format!("動画変換 失敗: {err}")),
         }
         result
-    }))
+    })))
+}
+
+/// 変換本体。分割なしなら単一ファイル、分割ありなら `_part000.mp4` 連番を生成
+fn run_convert(
+    input: &Path,
+    output: &Path,
+    encoder: &str,
+    video_bps: u64,
+    segment_secs: Option<u64>,
+) -> Result<Vec<PathBuf>> {
+    let Some(secs) = segment_secs else {
+        ffmpeg::convert_to_mp4(input, output, encoder, video_bps)?;
+        return Ok(vec![output.to_path_buf()]);
+    };
+
+    let dir = output.parent().context("出力先フォルダを特定できません")?;
+    let stem = output
+        .file_stem()
+        .context("出力ファイル名を特定できません")?
+        .to_string_lossy()
+        .into_owned();
+    let prefix = format!("{stem}_part");
+
+    // 前回の分割出力が残っていると新旧が混在するため先に削除
+    // （既存チェックは plan_outputs 済み = ここに来る時点で上書き許可済み）
+    for old in collect_parts(dir, &prefix)? {
+        std::fs::remove_file(&old)
+            .with_context(|| format!("既存ファイルを削除できません: {}", old.display()))?;
+    }
+
+    let pattern = dir.join(format!("{prefix}%03d.mp4"));
+    ffmpeg::convert_to_mp4_segments(input, &pattern, encoder, video_bps, secs)?;
+
+    let parts = collect_parts(dir, &prefix)?;
+    if parts.is_empty() {
+        bail!("分割出力が生成されませんでした");
+    }
+    Ok(parts)
+}
+
+/// prefix で始まる .mp4 ファイルをソート済みで収集
+fn collect_parts(dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
+    let mut parts: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("フォルダを読めません: {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let is_mp4 = path
+                .extension()
+                .map(|ext| ext.eq_ignore_ascii_case("mp4"))
+                .unwrap_or(false);
+            let matches_prefix = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().starts_with(prefix))
+                .unwrap_or(false);
+            is_mp4 && matches_prefix
+        })
+        .collect();
+    parts.sort();
+    Ok(parts)
 }
 
 /// 音声抽出 →（16kHz WAV 生成 → 文字起こし）を順次実行
@@ -260,13 +393,9 @@ fn run_transcribe(
     result
 }
 
-fn print_summary(outputs: &Outputs, elapsed_secs: f64) {
+fn print_summary(produced: &[PathBuf], elapsed_secs: f64) {
     println!("\n📦 出力先:");
-    for path in [outputs.mp4.as_deref(), Some(&outputs.m4a), outputs.txt.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter(|path| path.exists())
-    {
+    for path in produced.iter().filter(|path| path.exists()) {
         let size_mb = path
             .metadata()
             .map(|meta| meta.len() as f64 / 1024.0 / 1024.0)
@@ -274,10 +403,6 @@ fn print_summary(outputs: &Outputs, elapsed_secs: f64) {
         println!("  {} ({size_mb:.1} MB)", path.display());
     }
     println!("⏱️  合計時間: {elapsed_secs:.1} 秒");
-}
-
-fn bail_join_error() -> Result<()> {
-    Err(anyhow::anyhow!("動画変換スレッドが異常終了しました"))
 }
 
 #[cfg(test)]
@@ -289,6 +414,7 @@ mod tests {
             dir: None,
             file: None,
             codec: cli::Codec::H264,
+            max_size_mb: 200,
             bitrate: None,
             language: "ja".to_string(),
             whisper_model: None,
@@ -347,19 +473,84 @@ mod tests {
 
     #[test]
     fn ビットレート明示指定はそのまま使用() {
-        let bitrate = resolve_bitrate(Path::new("/nonexistent.mov"), Some("4M"));
-        assert_eq!(bitrate, "4M");
+        let bitrate = resolve_bitrate(Path::new("/nonexistent.mov"), Some("4M")).unwrap();
+        assert_eq!(bitrate, 4_000_000);
     }
 
     #[test]
     fn ビットレート検出不能時は既定の2m() {
-        let bitrate = resolve_bitrate(Path::new("/nonexistent.mov"), None);
-        assert_eq!(bitrate, "2M");
+        let bitrate = resolve_bitrate(Path::new("/nonexistent.mov"), None).unwrap();
+        assert_eq!(bitrate, 2_000_000);
     }
 
     #[test]
-    fn コーデック名はvideotoolbox() {
-        assert_eq!(cli::Codec::H264.ffmpeg_name(), "h264_videotoolbox");
-        assert_eq!(cli::Codec::Hevc.ffmpeg_name(), "hevc_videotoolbox");
+    fn 不正なビットレート指定はエラー() {
+        assert!(resolve_bitrate(Path::new("/nonexistent.mov"), Some("abc")).is_err());
+        assert!(resolve_bitrate(Path::new("/nonexistent.mov"), Some("-1M")).is_err());
+    }
+
+    #[test]
+    fn ビットレート文字列の解釈() {
+        assert_eq!(parse_bitrate("2M"), Some(2_000_000));
+        assert_eq!(parse_bitrate("419k"), Some(419_000));
+        assert_eq!(parse_bitrate("800000"), Some(800_000));
+        assert_eq!(parse_bitrate("0.5M"), Some(500_000));
+        assert_eq!(parse_bitrate("abc"), None);
+        assert_eq!(parse_bitrate(""), None);
+    }
+
+    #[test]
+    fn 上限内なら分割しない() {
+        // 547kbps × 30分 ≈ 123MB < 200MB
+        assert_eq!(plan_split(1800.0, 547_000, 200_000_000), None);
+    }
+
+    #[test]
+    fn 上限超過なら分割する() {
+        // 2.128Mbps × 55分 ≈ 877MB > 200MB → 各セグメントが安全係数込みで上限未満になる長さ
+        let secs = plan_split(3300.0, 2_128_000, 200_000_000).expect("分割されるべき");
+        let segment_bytes = 2_128_000.0 / 8.0 * secs as f64;
+        assert!(segment_bytes < 200_000_000.0 * 0.9);
+        assert!(secs >= 1);
+    }
+
+    #[test]
+    fn 上限が小さくてもセグメントサイズ保証を優先() {
+        // 868kbps で上限 3MB → セグメントは約23秒（60秒に切り上げない）
+        let secs = plan_split(120.0, 868_000, 3_000_000).expect("分割されるべき");
+        let segment_bytes = 868_000.0 / 8.0 * secs as f64;
+        assert!(segment_bytes < 3_000_000.0);
+    }
+
+    #[test]
+    fn 分割無効化はゼロ指定() {
+        assert_eq!(plan_split(36000.0, 2_128_000, 0), None);
+    }
+
+    #[test]
+    fn 分割ファイルの収集は接頭辞と拡張子で絞る() {
+        let dir = tempfile::tempdir().expect("tempdir 作成失敗");
+        for name in ["rec_part000.mp4", "rec_part001.mp4", "rec.mp4", "other.mp4", "rec_part000.txt"] {
+            std::fs::write(dir.path().join(name), b"x").expect("書き込み失敗");
+        }
+        let parts = collect_parts(dir.path(), "rec_part").expect("収集失敗");
+        let names: Vec<_> = parts
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["rec_part000.mp4", "rec_part001.mp4"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macosはvideotoolboxを選択() {
+        assert_eq!(
+            ffmpeg::select_encoder(cli::Codec::H264).unwrap(),
+            "h264_videotoolbox"
+        );
+        assert_eq!(
+            ffmpeg::select_encoder(cli::Codec::Hevc).unwrap(),
+            "hevc_videotoolbox"
+        );
     }
 }
