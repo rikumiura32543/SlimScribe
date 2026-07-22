@@ -25,10 +25,10 @@ macOS (Apple Silicon) / Windows 対応、OBS録画ファイル後処理自動化
 ```bash
 brew install ffmpeg whisper-cpp
 
-# whisper モデルのダウンロード（例: small）
+# whisper モデルのダウンロード（推奨: large-v3-turbo / 約 1.6GB）
 mkdir -p ~/.cache/whisper
-curl -L -o ~/.cache/whisper/ggml-small.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+curl -L -o ~/.cache/whisper/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 ```
 
 ### Windows
@@ -39,8 +39,8 @@ curl -L -o ~/.cache/whisper/ggml-small.bin \
 
 ```powershell
 mkdir "$env:USERPROFILE\.cache\whisper"
-curl.exe -L -o "$env:USERPROFILE\.cache\whisper\ggml-small.bin" `
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+curl.exe -L -o "$env:USERPROFILE\.cache\whisper\ggml-large-v3-turbo.bin" `
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 ```
 
 リポジトリ同梱の **`slimscribe.bat` をダブルクリック**すれば、ビルド済みバイナリの検出→なければ自動ビルド→実行まで行う。

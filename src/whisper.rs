@@ -46,8 +46,8 @@ pub fn resolve_model(explicit: Option<&Path>) -> Result<PathBuf> {
         "whisper モデル (.bin) が見つかりません。\n\
          --whisper-model または環境変数 SLIMSCRIBE_WHISPER_MODEL で指定してください。\n\
          ダウンロード例:\n  \
-         mkdir -p ~/.cache/whisper && curl -L -o ~/.cache/whisper/ggml-small.bin \\\n    \
-         https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+         mkdir -p ~/.cache/whisper && curl -L -o ~/.cache/whisper/ggml-large-v3-turbo.bin \\\n    \
+         https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
     )
 }
 
